@@ -15,7 +15,7 @@ packages = [ { include = "applause", from = "src" } ]
 [tool.poetry.dependencies]
 python = "^3.8.0"
 pytest = "^8.3.2"
-applause-common-reporter = {git = "https://github.com/ApplauseOSS/common-python-reporter", rev = "dev"}
+applause-common-reporter = {git = "https://github.com/ApplauseOSS/common-python-reporter", rev = "master"}
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.6.4"

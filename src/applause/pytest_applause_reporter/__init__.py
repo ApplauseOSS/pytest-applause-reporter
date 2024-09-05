@@ -21,6 +21,7 @@ from typing import Generator, Optional, List
 import pytest
 from applause.common_python_reporter import ApplauseConfig, ApplauseReporter
 from applause.common_python_reporter.dtos import TestResultStatus, AssetType
+from applause.common_python_reporter.email_helper import EmailHelper
 
 
 class ApplauseResult:
@@ -103,6 +104,7 @@ class ApplausePytestPlugin:
     Attributes
     ----------
         reporter (ApplauseReporter): The underlying ApplauseReporter object.
+        auto_api (AutoApi): The AutoAPI object for interacting with the Applause Services.
 
     """
 
@@ -115,6 +117,7 @@ class ApplausePytestPlugin:
 
         """
         self.reporter = ApplauseReporter(config=config)
+        self.auto_api = self.reporter.auto_api
         pass
 
     @pytest.fixture(scope="session")
@@ -133,6 +136,21 @@ class ApplausePytestPlugin:
         self.reporter.runner_start(tests=[item.name for item in request.session.items])
         yield self.reporter
         self.reporter.runner_end()
+
+    @pytest.fixture(scope="session")
+    def email_helper(self) -> Generator[EmailHelper, None, None]:
+        """Generate an EmailHelper for use within a PyTest session.
+
+        Args:
+        ----
+            request (pytest.FixtureRequest): The pytest fixture request object.
+
+        Yields:
+        ------
+            EmailHelper: An instance of EmailHelper for email testing.
+
+        """
+        yield EmailHelper(auto_api=self.auto_api)
 
     @pytest.fixture(scope="function")
     def applause_result(self, request: pytest.FixtureRequest, applause_reporter: ApplauseReporter) -> Generator[ApplauseResult, None, None]:
