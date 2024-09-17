@@ -19,8 +19,12 @@ def test_something(applause_result: ApplauseResult):
 
 from typing import Generator, Optional, List
 import pytest
+from _pytest.nodes import Node
+from _pytest.reports import ExceptionChainRepr
+import sys
 from applause.common_python_reporter import ApplauseConfig, ApplauseReporter
 from applause.common_python_reporter.dtos import TestResultStatus, AssetType
+from applause.common_python_reporter.email_helper import EmailHelper
 
 
 class ApplauseResult:
@@ -30,8 +34,6 @@ class ApplauseResult:
     ----------
         reporter (ApplauseReporter): The ApplauseReporter object.
         nodeid (str): The pytest node ID.
-        applause_test_case_id (None): The Applause test case ID.
-        testrail_test_case_id (None): The TestRail test case ID.
         provider_session_guids (List[str]): The list of provider session GUIDs.
 
     """
@@ -59,9 +61,8 @@ class ApplauseResult:
         """
         self.reporter = reporter
         self.nodeid = nodeid
-        self.applause_test_case_id: Optional[str] = None
-        self.testrail_test_case_id: Optional[str] = None
         self.provider_session_guids: List[str] = []
+        self.result_logs = []
 
     def register_session_id(self, provider_session_guid: str):
         """Register a provider session ID to the Applause Test Case Result.
@@ -76,6 +77,17 @@ class ApplauseResult:
 
         """
         self.provider_session_guids.append(provider_session_guid)
+
+    def log(self, message: str):
+        """Print a message to the console and store it in the result logs. Result logs are attached as an asset to the test case after the result is completed.
+
+        Args:
+        ----
+            message (str): The message to be logged.
+
+        """
+        sys.stdout.write(message)
+        self.result_logs.append(message)
 
     def attach_asset(self, asset_name: str, asset: bytes, asset_type: AssetType, provider_session_guid: Optional[str] = None) -> None:
         """Attach an asset to the test case.
@@ -103,6 +115,7 @@ class ApplausePytestPlugin:
     Attributes
     ----------
         reporter (ApplauseReporter): The underlying ApplauseReporter object.
+        auto_api (AutoApi): The AutoAPI object for interacting with the Applause Services.
 
     """
 
@@ -115,7 +128,22 @@ class ApplausePytestPlugin:
 
         """
         self.reporter = ApplauseReporter(config=config)
+        self.auto_api = self.reporter.auto_api
         pass
+
+    # set up a hook to be able to check if a test has failed
+    @pytest.hookimpl(tryfirst=True, hookwrapper=True)
+    def pytest_runtest_makereport(self, item: pytest.Item):
+        """Mark the pytest item with a status once it is known by pytest.
+
+        Args:
+        ----
+            item (pytest.Item): The pytest item object.
+
+        """
+        outcome = yield
+        rep: pytest.TestReport = outcome.get_result()
+        item.status = rep
 
     @pytest.fixture(scope="session")
     def applause_reporter(self, request: pytest.FixtureRequest) -> Generator[ApplauseReporter, None, None]:
@@ -134,6 +162,21 @@ class ApplausePytestPlugin:
         yield self.reporter
         self.reporter.runner_end()
 
+    @pytest.fixture(scope="session")
+    def email_helper(self) -> Generator[EmailHelper, None, None]:
+        """Generate an EmailHelper for use within a PyTest session.
+
+        Args:
+        ----
+            request (pytest.FixtureRequest): The pytest fixture request object.
+
+        Yields:
+        ------
+            EmailHelper: An instance of EmailHelper for email testing.
+
+        """
+        yield EmailHelper(auto_api=self.auto_api)
+
     @pytest.fixture(scope="function")
     def applause_result(self, request: pytest.FixtureRequest, applause_reporter: ApplauseReporter) -> Generator[ApplauseResult, None, None]:
         """Generate an ApplauseResult for use within a PyTest function.
@@ -148,14 +191,32 @@ class ApplausePytestPlugin:
             ApplauseResult: The result tracker object used for tracking the test case result.
 
         """
-        applause_reporter.start_test_case(id=request.node.nodeid, test_case_name=request.node.name, provider_session_ids=[])
-        result_tracker = ApplauseResult(reporter=self.reporter, nodeid=request.node.nodeid)
+        node: Node = request.node
+        applause_test_case_id = node.get_closest_marker("applause_test_case_id")
+        test_rail_test_case_id = node.get_closest_marker("test_rail_test_case_id")
+        applause_reporter.start_test_case(id=node.nodeid, test_case_name=node.name, provider_session_ids=[])
+        result_tracker = ApplauseResult(reporter=self.reporter, nodeid=node.nodeid)
+        result_tracker.log(f"Starting test case {node.name}")
+
+        # Yield the result tracker to the test
         yield result_tracker
 
+        status: pytest.TestReport = node.status
+        result_status = TestResultStatus.FAILED if status.failed else TestResultStatus.PASSED
+        error_rep: ExceptionChainRepr = status.longrepr
+
+        # Add some log messages to the result tracker
+        result_tracker.log(f"Test case {node.name} has completed with status: {'FAILED' if status.failed else 'PASSED'}")
+        if status.failed:
+            result_tracker.log(status.longreprtext)
+
+        result_tracker.attach_asset(asset_name="console_log.txt", asset="\n".join(result_tracker.result_logs), asset_type=AssetType.CONSOLE_LOG)
+
         applause_reporter.submit_test_case_result(
-            id=request.node.nodeid,
-            status=TestResultStatus.PASSED,
+            id=node.nodeid,
+            status=result_status,
+            failure_reason=error_rep.reprcrash.message if status.failed else None,
             provider_session_guids=list(result_tracker.provider_session_guids),
-            applause_test_case_id=result_tracker.applause_test_case_id,
-            test_rail_case_id=result_tracker.testrail_test_case_id,
+            applause_test_case_id=applause_test_case_id.args[0] if applause_test_case_id is not None else None,
+            test_rail_case_id=test_rail_test_case_id.args[0] if test_rail_test_case_id is not None else None,
         )
